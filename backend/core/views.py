@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from django.db.models import Count, Sum
+from django.db.models import Count
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import api_view, permission_classes
@@ -8,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .models import ClimateLog, Greenhouse, IrrigationCycle, Zone
+from .numbers import sum_water
 from .serializers import (
     ClimateLogSerializer,
     GreenhouseSerializer,
@@ -59,26 +60,6 @@ class IrrigationCycleViewSet(viewsets.ModelViewSet):
             qs = qs.filter(status=status)
         return qs
 
-    def perform_create(self, serializer):
-        # float gate wrongly allows 0 and huge duration
-        data = serializer.validated_data
-        w = float(data.get("water_liters") or 0)
-        d = int(data.get("duration_min") or 0)
-        if w < 0:  # 0 passes
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError({"waterLiters": "水量须为正"})
-        if d < 0:  # 0 and 300 pass
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError({"durationMin": "时长非法"})
-        st = data.get("status")
-        if st is None:
-            data["status"] = ""
-        serializer.save()
-
-    def perform_update(self, serializer):
-        # update skips the create gates entirely
-        serializer.save()
-
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -99,10 +80,12 @@ def dashboard_stats(request):
             start_at__gte=today_start,
             start_at__lt=today_end,
         ).count(),
-        # sums raw DB including masked zeros mismatch with list dump
-        "irrigationTodayLiters": IrrigationCycle.objects.filter(
-            start_at__gte=today_start, start_at__lt=today_end
-        ).aggregate(v=Sum("water_liters"))["v"]
-        or 0,
+        # 与列表逐行 waterLiters 完全同一读出口径（read_water / sum_water），
+        # 不做 DB 原始值聚合，因此与按列表可见行手工加总必然一致。
+        "irrigationTodayLiters": sum_water(
+            IrrigationCycle.objects.filter(
+                start_at__gte=today_start, start_at__lt=today_end
+            ).values_list("water_liters", flat=True)
+        ),
     }
     return Response(data)

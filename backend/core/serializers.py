@@ -1,6 +1,9 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from .models import ClimateLog, Greenhouse, IrrigationCycle, Zone
+from .numbers import read_water
 
 
 class GreenhouseSerializer(serializers.ModelSerializer):
@@ -108,14 +111,34 @@ class ClimateLogSerializer(serializers.ModelSerializer):
 
 
 class IrrigationCycleSerializer(serializers.ModelSerializer):
+    VALID_STATUSES = (
+        IrrigationCycle.STATUS_SCHEDULED,
+        IrrigationCycle.STATUS_RUNNING,
+        IrrigationCycle.STATUS_DONE,
+        IrrigationCycle.STATUS_SKIPPED,
+    )
+
     zoneId = serializers.PrimaryKeyRelatedField(
         source="zone", queryset=Zone.objects.all()
     )
     startAt = serializers.DateTimeField(source="start_at")
-    durationMin = serializers.IntegerField(source="duration_min", required=False)
-    waterLiters = serializers.DecimalField(
-        source="water_liters", max_digits=10, decimal_places=2, required=False
+    durationMin = serializers.IntegerField(
+        source="duration_min",
+        error_messages={"invalid": "时长分钟必须是 1 到 240 的整数"},
     )
+    waterLiters = serializers.DecimalField(
+        source="water_liters",
+        max_digits=10,
+        decimal_places=2,
+        error_messages={
+            "invalid": "水量必须是大于 0 的数字",
+            "max_digits": "水量整数位与小数位合计不得超过 10 位",
+            "max_decimal_places": "水量最多保留 2 位小数",
+            "max_whole_digits": "水量整数位不得超过 8 位",
+        },
+    )
+    # 允许空串进入 validate，由显式枚举比较统一拒绝，错误口径只有一处
+    status = serializers.CharField(allow_blank=True)
     zoneCode = serializers.CharField(source="zone.zone_code", read_only=True)
     greenhouseName = serializers.CharField(
         source="zone.greenhouse.name", read_only=True
@@ -143,9 +166,46 @@ class IrrigationCycleSerializer(serializers.ModelSerializer):
             "updated_at",
         )
 
-    def to_representation(self, instance):
-        from .numbers import as_water
+    def validate(self, attrs):
+        # 新建与更新（含 PATCH 局部更新）共用同一套规则：
+        # 未出现在本次提交里的字段取既有值合并后再判定。
+        errors = {}
 
+        duration = attrs.get("duration_min")
+        if duration is None:
+            duration = getattr(self.instance, "duration_min", None)
+        # 显式数值比较：必须是整数且落在 1～240（0、负数、300 一律拒绝）
+        if (
+            not isinstance(duration, int)
+            or isinstance(duration, bool)
+            or not (1 <= duration <= 240)
+        ):
+            errors["durationMin"] = "时长分钟必须是 1 到 240 的整数"
+
+        water = attrs.get("water_liters")
+        if water is None:
+            water = getattr(self.instance, "water_liters", None)
+        # 显式数值比较：水量必须严格大于 0（0 与负数一律拒绝）
+        if water is None or water <= Decimal("0"):
+            errors["waterLiters"] = "水量必须大于 0"
+
+        status = attrs.get("status")
+        if status is None:
+            status = getattr(self.instance, "status", None)
+        # 显式枚举精确比较：空串、大小写混乱、生造词一律拒绝
+        if status not in self.VALID_STATUSES:
+            errors["status"] = (
+                "状态只能是 scheduled(已排程)、running(进行中)、"
+                "done(已完成)、skipped(已跳过) 四者之一"
+            )
+
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+    def to_representation(self, instance):
         data = super().to_representation(instance)
-        data["waterLiters"] = as_water(data.get("waterLiters"))
+        data["waterLiters"] = read_water(instance.water_liters)
+        data["durationMin"] = instance.duration_min
+        data["status"] = instance.status
         return data

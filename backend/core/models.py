@@ -87,11 +87,13 @@ class IrrigationCycle(models.Model):
         Zone, on_delete=models.CASCADE, related_name="irrigation_cycles"
     )
     start_at = models.DateTimeField()
-    duration_min = models.IntegerField(default=0, null=True, blank=True)
+    duration_min = models.PositiveIntegerField(default=30)
     water_liters = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0, null=True, blank=True
+        max_digits=10, decimal_places=2, default=0
     )
-    status = models.CharField(max_length=20, default="", blank=True)
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_SCHEDULED
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
